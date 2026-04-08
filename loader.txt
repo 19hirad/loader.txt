@@ -2,10 +2,547 @@
 name = Color Erkenner
 image = https://hirad.cloud/project/color.png
 description = Erkennt jede Farbe auf deinem Bildschirm in Echtzeit.
-url = https://hirad.cloud/project/color.py
+code = 
+import numpy as np
+import win32api
+import win32con
+import threading
+import keyboard
+import time
+import ctypes
+import mss
+import cv2
+import os
+import sys
+import hashlib
+import requests
+import json
+import uuid
+import wmi
+from datetime import datetime
+from colorama import init, Fore
+import base64
+from Crypto.Cipher import AES
+from Crypto.Util.Padding import pad, unpad
+from Crypto.Random import get_random_bytes
+
+init(autoreset=True)
+
+class Encryption:
+    def __init__(self):
+        self.key = self.generate_key()
+    
+    def generate_key(self):
+        machine_guid = str(uuid.getnode())
+        return hashlib.sha256(machine_guid.encode()).digest()
+    
+    def encrypt(self, data):
+        try:
+            if isinstance(data, str):
+                data = data.encode()
+            iv = get_random_bytes(16)
+            cipher = AES.new(self.key, AES.MODE_CBC, iv)
+            encrypted = cipher.encrypt(pad(data, AES.block_size))
+            return base64.b64encode(iv + encrypted).decode()
+        except:
+            return data
+    
+    def decrypt(self, encrypted_data):
+        try:
+            if isinstance(encrypted_data, str):
+                encrypted_data = base64.b64decode(encrypted_data.encode())
+            iv = encrypted_data[:16]
+            cipher = AES.new(self.key, AES.MODE_CBC, iv)
+            decrypted = unpad(cipher.decrypt(encrypted_data[16:]), AES.block_size)
+            return decrypted.decode()
+        except:
+            return encrypted_data
+
+def protect_console():
+    if os.name == 'nt':
+        try:
+            kernel32 = ctypes.windll.kernel32
+            user32 = ctypes.windll.user32
+            console_handle = kernel32.GetConsoleWindow()
+            current_style = user32.GetWindowLongA(console_handle, -16)
+            user32.SetWindowLongA(console_handle, -16, current_style & ~0x00F00000)
+            input_handle = kernel32.GetStdHandle(-10)
+            current_mode = ctypes.c_uint32()
+            kernel32.GetConsoleMode(input_handle, ctypes.byref(current_mode))
+            new_mode = current_mode.value & ~0x0040
+            new_mode = new_mode | 0x0080
+            kernel32.SetConsoleMode(input_handle, new_mode)
+        except Exception as error:
+            pass
+
+class Authentication:
+    def __init__(self, app_name, owner_id, app_version, file_hash):
+        self.app_name = app_name
+        self.owner_id = owner_id
+        self.app_version = app_version
+        self.file_hash = file_hash
+        self.initialized = False
+        self.session_id = None
+        self.encryption_key = None
+        self.expiry_date = None
+        self.crypto = Encryption()
+        
+    def initialize(self):
+        try:
+            clear_display()
+            self.initialized = True
+            auth_data = {
+                'type': 'init',
+                'name': self.app_name,
+                'ownerid': self.owner_id,
+                'ver': self.app_version,
+                'hwid': self.get_hardware_id()
+            }
+            
+            response = requests.post("https://keyauth.win/api/1.2/", data=auth_data, timeout=5).json()
+            
+            if response['success']:
+                self.session_id = response['sessionid']
+                self.encryption_key = response.get('enckey')
+                return True
+            print(f"{Fore.RED}Initialization failed: {response['message']}")
+        except Exception as error:
+            print(f"{Fore.RED}Authentication error: {str(error)}")
+        sys.exit()
+    
+    def verify_license(self, license_key):
+        if not self.initialized:
+            print(f"{Fore.RED}Initialize authentication first")
+            return False
+        
+        try:
+            license_data = {
+                'type': 'license',
+                'key': license_key,
+                'sessionid': self.session_id,
+                'name': self.app_name,
+                'ownerid': self.owner_id,
+                'hwid': self.get_hardware_id()
+            }
+            
+            response = requests.post("https://keyauth.win/api/1.2/", data=license_data, timeout=5).json()
+            
+            if response['success']:
+                print(f"{Fore.GREEN}License verified successfully!")
+                self.expiry_date = response.get('expiry') or response.get('info', {}).get('expiry') or int(time.time()) + 31536000
+                return True
+            print(f"{Fore.RED}License verification failed: {response['message']}")
+        except Exception as error:
+            print(f"{Fore.RED}License error: {str(error)}")
+        time.sleep(1)
+        return False
+    
+    def get_hardware_id(self):
+        try:
+            mac_address = ':'.join(f'{((uuid.getnode() >> i) & 0xff):02x}' for i in range(0, 8*6, 8)[::-1])
+            return hashlib.sha256(mac_address.encode()).hexdigest()
+        except:
+            return "default_hardware_id"
+
+def calculate_file_hash():
+    try:
+        with open(sys.argv[0], "rb") as executable_file:
+            return hashlib.md5(executable_file.read()).hexdigest()
+    except:
+        return "0"*32
+
+auth_system = Authentication("COLOR BOT", "AfEXYMb1e7", "1.3", calculate_file_hash())
+crypto = Encryption()
+
+running_state = False
+last_shot_timestamp = 0
+hold_mode_active = False
+current_hold_key = None
+hold_button_state = False
+waiting_for_key_input = False
+binds_locked_state = False
+hidden_state = False
+
+MOUSE_CODES = {
+    'left': 0x01,
+    'right': 0x02, 
+    'middle': 0x04,
+    'xbutton1': 0x05,
+    'xbutton2': 0x06
+}
+
+CODE_TO_NAME = {v: k for k, v in MOUSE_CODES.items()}
+
+TARGET_COLOR_RANGE_MIN = np.array([0, 0, 150])
+TARGET_COLOR_RANGE_MAX = np.array([100, 100, 255])
+SHOT_DELAY = 0.15
+
+def clear_display():
+    os.system('cls' if os.name == 'nt' else 'clear')
+
+def display_banner():
+    return f"""
+{Fore.WHITE}     ██████╗  ██╗  ██╗ ██╗  ██╗                     
+{Fore.WHITE}    ██╔═████╗ ╚██╗██╔╝ ██║  ██║                     
+{Fore.WHITE}    ██║██╔██║  ╚███╔╝  ███████║                     
+{Fore.WHITE}    ████╔╝██║  ██╔██╗  ██╔══██║                     
+{Fore.WHITE}    ╚██████╔╝ ██╔╝ ██╗ ██║  ██║                     
+{Fore.WHITE}     ╚═════╝  ╚═╝  ╚═╝ ╚═╝  ╚═╝
+                                                  
+          {Fore.WHITE}MADE BY STEUERN
+"""
+
+def refresh_status():
+    if hidden_state:
+        return
+        
+    clear_display()
+    print(display_banner())
+    status_lines = [
+        f"{Fore.WHITE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        f"{Fore.LIGHTBLACK_EX}Status: {Fore.GREEN if running_state else Fore.RED}{'ACTIVE' if running_state else 'INACTIVE'}  "
+        f"{Fore.LIGHTBLACK_EX}Hold-Mode: {Fore.GREEN if hold_mode_active else Fore.RED}{'ACTIVE' if hold_mode_active else 'INACTIVE'}  "
+        f"{Fore.LIGHTBLACK_EX}Hidden: {Fore.GREEN if hidden_state else Fore.RED}{'YES' if hidden_state else 'NO'}",
+        f"{Fore.WHITE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        *([f"{Fore.LIGHTBLACK_EX}Hold-Key: {Fore.YELLOW}{current_hold_key}"] if hold_mode_active else []),
+        f"{Fore.WHITE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        f"{Fore.YELLOW}F2{Fore.WHITE}: Toggle Bot  {Fore.YELLOW}F5{Fore.WHITE}: Hold-Mode  {Fore.YELLOW}F10{Fore.WHITE}: Hide  {Fore.YELLOW}F12{Fore.WHITE}: Exit",
+        f"{Fore.WHITE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    ]
+    print('\n'.join(status_lines))
+
+def get_center_pixel():
+    try:
+        user32 = ctypes.windll.user32
+        screen_width, screen_height = user32.GetSystemMetrics(0), user32.GetSystemMetrics(1)
+        center_x = screen_width // 2
+        center_y = screen_height // 2
+        return center_x, center_y
+    except:
+        return 960, 540
+
+def trigger_shot():
+    global last_shot_timestamp
+    current_time = time.time()
+    if current_time - last_shot_timestamp >= SHOT_DELAY:
+        try:
+            win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
+            time.sleep(0.001)
+            win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+            last_shot_timestamp = current_time
+        except:
+            pass
+
+def color_scan_loop():
+    global running_state, hold_mode_active, hold_button_state
+    screen_capture = mss.mss()
+    center_x, center_y = get_center_pixel()
+    
+    scan_region = {
+        "left": center_x,
+        "top": center_y,
+        "width": 1,
+        "height": 1
+    }
+    
+    while True:
+        if running_state and (not hold_mode_active or hold_button_state):
+            try:
+                captured_image = cv2.cvtColor(np.array(screen_capture.grab(scan_region)), cv2.COLOR_BGRA2BGR)
+                center_pixel = captured_image[0, 0]
+                
+                if (TARGET_COLOR_RANGE_MIN[0] <= center_pixel[0] <= TARGET_COLOR_RANGE_MAX[0] and
+                    TARGET_COLOR_RANGE_MIN[1] <= center_pixel[1] <= TARGET_COLOR_RANGE_MAX[1] and
+                    TARGET_COLOR_RANGE_MIN[2] <= center_pixel[2] <= TARGET_COLOR_RANGE_MAX[2]):
+                    trigger_shot()
+                time.sleep(0.001)
+            except:
+                time.sleep(0.001)
+        else:
+            time.sleep(0.01)
+
+def toggle_bot_state():
+    global running_state
+    if not hidden_state:
+        running_state = not running_state
+        refresh_status()
+
+def hide_program():
+    global hidden_state, binds_locked_state
+    hidden_state = not hidden_state
+    binds_locked_state = hidden_state
+    
+    if hidden_state:
+        console_window = ctypes.windll.kernel32.GetConsoleWindow()
+        if console_window:
+            ctypes.windll.user32.ShowWindow(console_window, 0)
+    else:
+        console_window = ctypes.windll.kernel32.GetConsoleWindow()
+        if console_window:
+            ctypes.windll.user32.ShowWindow(console_window, 5)
+        refresh_status()
+
+def get_key_name(vk_code):
+    key_names = {
+        0x01: "left", 0x02: "right", 0x04: "middle",
+        0x05: "xbutton1", 0x06: "xbutton2",
+        0x10: "shift", 0x11: "ctrl", 0x12: "alt",
+        0x14: "capslock", 0x20: "space", 0x25: "left", 
+        0x26: "up", 0x27: "right", 0x28: "down"
+    }
+    return key_names.get(vk_code, f"key_{vk_code}")
+
+def wait_for_key_input():
+    global current_hold_key, waiting_for_key_input
+    
+    print(f"{Fore.YELLOW}Press any key or mouse button...")
+    
+    time.sleep(0.5)
+    
+    pressed_keys = set()
+    start_time = time.time()
+    
+    while waiting_for_key_input and time.time() - start_time < 10:
+        try:
+            for vk_code in range(1, 256):
+                if win32api.GetAsyncKeyState(vk_code) & 0x8000:
+                    if vk_code not in pressed_keys:
+                        pressed_keys.add(vk_code)
+                        if vk_code == 0x1B:
+                            return None
+                        time.sleep(0.3)
+                        return get_key_name(vk_code)
+            
+            for mouse_code, button_name in MOUSE_CODES.items():
+                if win32api.GetAsyncKeyState(mouse_code) & 0x8000:
+                    if mouse_code not in pressed_keys:
+                        pressed_keys.add(mouse_code)
+                        time.sleep(0.3)
+                        return button_name
+            
+            time.sleep(0.01)
+        except:
+            time.sleep(0.01)
+    
+    return None
+
+def configure_hold_mode():
+    global hold_mode_active, waiting_for_key_input, current_hold_key, hold_button_state
+    if not hidden_state:
+        hold_mode_active = not hold_mode_active
+        
+        if hold_mode_active:
+            waiting_for_key_input = True
+            refresh_status()
+            
+            selected_key = wait_for_key_input()
+            
+            if selected_key:
+                current_hold_key = selected_key
+            else:
+                hold_mode_active = False
+                current_hold_key = None
+            
+            waiting_for_key_input = False
+            refresh_status()
+        else:
+            current_hold_key = None
+            hold_button_state = False
+            refresh_status()
+
+def check_hold_key_state():
+    global hold_button_state, current_hold_key
+    
+    if not hold_mode_active or not current_hold_key:
+        return False
+    
+    try:
+        if current_hold_key in MOUSE_CODES:
+            vk_code = MOUSE_CODES[current_hold_key]
+            state = win32api.GetAsyncKeyState(vk_code) & 0x8000
+        else:
+            for vk_code in range(1, 256):
+                if get_key_name(vk_code) == current_hold_key:
+                    state = win32api.GetAsyncKeyState(vk_code) & 0x8000
+                    break
+            else:
+                return False
+        
+        return bool(state)
+    except:
+        return False
+
+def hold_key_monitor():
+    global hold_button_state
+    
+    while True:
+        if hold_mode_active and current_hold_key:
+            new_state = check_hold_key_state()
+            if new_state != hold_button_state:
+                hold_button_state = new_state
+                if not hidden_state:
+                    refresh_status()
+        time.sleep(0.01)
+
+def setup_hotkeys():
+    try:
+        keyboard.add_hotkey('f2', toggle_bot_state)
+        keyboard.add_hotkey('f10', hide_program)
+        keyboard.add_hotkey('f5', configure_hold_mode)
+        keyboard.add_hotkey('f12', shutdown_program)
+    except:
+        print(f"{Fore.RED}Key conflict or admin rights needed")
+        time.sleep(2)
+
+def shutdown_program():
+    time.sleep(0.5)
+    os._exit(0)
+
+def security_verification():
+    try:
+        if ctypes.windll.kernel32.IsDebuggerPresent():
+            return False
+            
+        def process_check():
+            try:
+                wmi_connection = wmi.WMI()
+                monitoring_tools = ["ida", "ghidra", "x64dbg", "dnspy", "cheatengine", "ollydbg", "processhacker"]
+                for process in wmi_connection.Win32_Process():
+                    process_name = process.Name.lower()
+                    if any(tool in process_name for tool in monitoring_tools):
+                        return False
+                return True
+            except:
+                return True
+                
+        security_thread = threading.Thread(target=process_check)
+        security_thread.daemon = True
+        security_thread.start()
+        security_thread.join(timeout=1)
+        
+        return True
+        
+    except:
+        return True
+
+def store_license_key(license_key):
+    try:
+        cache_directory = os.path.join(os.getenv('LOCALAPPDATA'), 'cache')
+        if not os.path.exists(cache_directory):
+            os.makedirs(cache_directory)
+        
+        encrypted_license = crypto.encrypt(license_key)
+        license_file_path = os.path.join(cache_directory, 'license.dat')
+        
+        with open(license_file_path, 'w') as license_file:
+            license_file.write(encrypted_license)
+        
+        if os.name == 'nt':
+            ctypes.windll.kernel32.SetFileAttributesW(license_file_path, 2)
+        return True
+    except:
+        return False
+
+def retrieve_license_key():
+    try:
+        license_file_path = os.path.join(os.getenv('LOCALAPPDATA'), 'cache', 'license.dat')
+        if os.path.exists(license_file_path):
+            with open(license_file_path, 'r') as license_file:
+                encrypted_data = license_file.read().strip()
+                return crypto.decrypt(encrypted_data)
+    except:
+        pass
+    return None
+
+def obfuscate_strings():
+    strings = {
+        "COLOR BOT": "AfEXYMb1e7",
+        "license.dat": "cache",
+        "keyauth.win": "api/1.2/"
+    }
+    return strings
+
+def encrypt_config_data():
+    config = {
+        "target_color_min": TARGET_COLOR_RANGE_MIN.tolist(),
+        "target_color_max": TARGET_COLOR_RANGE_MAX.tolist(),
+        "shot_delay": SHOT_DELAY
+    }
+    return crypto.encrypt(json.dumps(config))
+
+def license_verification_process():
+    scanner_thread = threading.Thread(target=color_scan_loop, daemon=True)
+    scanner_thread.start()
+    
+    hold_monitor_thread = threading.Thread(target=hold_key_monitor, daemon=True)
+    hold_monitor_thread.start()
+    
+    auth_system.initialize()
+    
+    saved_license = retrieve_license_key()
+    if saved_license and auth_system.verify_license(saved_license):
+        print(f"\n{Fore.GREEN}Saved license activated successfully!")
+        time.sleep(1)
+        return True
+    
+    clear_display()
+    print(f"{Fore.CYAN}Enter License Key: ", end='')
+    user_license_key = input().strip()
+    
+    if auth_system.verify_license(user_license_key):
+        clear_display()
+        print(f"{Fore.GREEN}License verified!")
+        print(f"{Fore.CYAN}Save license key? (y/n): ", end='')
+        user_choice = input().strip().lower()
+        
+        if user_choice == 'y':
+            if store_license_key(user_license_key):
+                print(f"{Fore.GREEN}License key saved!")
+            else:
+                print(f"{Fore.RED}Save failed!")
+        time.sleep(1)
+        return True
+    
+    print(f"\n{Fore.RED}Invalid License!")
+    time.sleep(2)
+    sys.exit()
+
+def main():
+    protect_console()
+    clear_display()
+    print(f"{Fore.CYAN}Security check...")
+    
+    security_check_passed = security_verification()
+    
+    if not (security_check_passed and license_verification_process()):
+        sys.exit()
+        
+    refresh_status()
+    setup_hotkeys()
+    
+    while True:
+        time.sleep(0.1)
+
+if __name__ == "__main__":
+    main()
 
 [screenshot]
 name = Screenshot Tool
 image = https://hirad.cloud/project/ss.png
-description = Macht automatische Screenshots und speichert sie.
-url = https://hirad.cloud/project/screenshot.py
+description = Macht automatische Screenshots
+code = 
+import pyautogui
+import time
+from datetime import datetime
+import os
+
+def take_screenshot():
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"screenshot_{timestamp}.png"
+    pyautogui.screenshot(filename)
+    print(f"Screenshot saved: {filename}")
+
+if __name__ == "__main__":
+    while True:
+        take_screenshot()
+        time.sleep(5)
