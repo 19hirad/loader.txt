@@ -1,0 +1,11 @@
+[colorerkenner]
+name = Color Erkenner
+image = https://hirad.cloud/project/color.png
+description = Erkennt jede Farbe auf deinem Bildschirm in Echtzeit.
+url = https://hirad.cloud/project/color.py
+
+[screenshot]
+name = Screenshot Tool
+image = https://hirad.cloud/project/ss.png
+description = Macht automatische Screenshots und speichert sie.
+url = https://hirad.cloud/project/screenshot.py
