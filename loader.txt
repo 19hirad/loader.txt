@@ -9,3 +9,5 @@ name = Screenshot Tool
 image = https://hirad.cloud/project/ss.png
 description = Macht automatische Screenshots und speichert sie.
 url = https://hirad.cloud/project/screenshot.py
+
+dsgfsfsdf
